@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sprechstunde"
+version = "0.1.0"
+description = "A voice agent for official German letters that only says what it can prove."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Doğa Paksoy" }]
+dependencies = [
+    "belegt @ git+https://github.com/dogapaksoy/belegt.git",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+local = ["llama-cpp-python>=0.3", "huggingface_hub>=0.23"]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+sprechstunde = "sprechstunde.cli:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sprechstunde"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
