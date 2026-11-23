@@ -15,6 +15,14 @@ def _backend(name: str):
     return LlamaCppBackend(name)
 
 
+def _relevance(on: bool):
+    if not on:
+        return None
+    from sprechstunde.relevance import NLITopicCheck
+
+    return NLITopicCheck()
+
+
 def _cmd_chat(args: argparse.Namespace) -> int:
     paths = sorted(Path(args.letters).glob("*.txt"))
     if not paths:
@@ -31,6 +39,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         mailbox,
         escalate_to=_backend(args.escalate) if args.escalate else None,
         confirm=confirm,
+        relevance=_relevance(args.relevance),
     )
     print(f"{len(paths)} Briefe geladen. Frage stellen (leer = Ende).")
     while question := input("> ").strip():
@@ -47,21 +56,22 @@ def _cmd_eval(args: argparse.Namespace) -> int:
 
     out = Path(args.out)
     small, large = _backend(args.model), _backend(args.escalate)
-    escalating = ev.run(
-        f"{args.model}+verify+{args.escalate}",
-        lambda mb: Agent(small, mb, escalate_to=large),
-        args.n, out, args.noise, args.seed,
-    )  # fmt: skip
+    topic = _relevance(True)
+    m, big = args.model, args.escalate
+
+    def run(name, **kw):
+        backend = kw.pop("backend", small)
+        return ev.run(name, lambda mb: Agent(backend, mb, **kw), args.n, out, args.noise, args.seed)
+
+    grounding = run(f"{m}+verify+{big}", escalate_to=large)
+    full = run(f"{m}+verify+topic+{big}", escalate_to=large, relevance=topic)
     summaries = [
-        ev.Summary.of(f"{args.model} (no verification)", ev.run(
-            f"{args.model}", lambda mb: Agent(small, mb, verify=False),
-            args.n, out, args.noise, args.seed)),
-        ev.Summary.of(f"{args.model} + verification",
-                      ev.without_escalation(escalating, f"{args.model}+verify")),
-        ev.Summary.of(f"{args.model} + verification + escalation to {args.escalate}", escalating),
-        ev.Summary.of(f"{args.escalate} (no verification)", ev.run(
-            f"{args.escalate}", lambda mb: Agent(large, mb, verify=False),
-            args.n, out, args.noise, args.seed)),
+        ev.Summary.of(f"{m}, no checks", run(m, verify=False)),
+        ev.Summary.of(f"{m} + grounding", ev.without_escalation(grounding, f"{m}+verify")),
+        ev.Summary.of(f"{m} + grounding + topic", ev.without_escalation(full, f"{m}+topic")),
+        ev.Summary.of(f"{m} + grounding + escalation to {big}", grounding),
+        ev.Summary.of(f"**{m} + grounding + topic + escalation to {big}**", full),
+        ev.Summary.of(f"{big}, no checks", run(big, verify=False, backend=large)),
     ]  # fmt: skip
     table = ev.to_markdown(summaries)
     print(table)
@@ -78,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--model", default="qwen3-1.7b")
     c.add_argument("--escalate", default="qwen3-4b", help="larger model; '' to disable")
     c.add_argument("--trace", action="store_true", help="print every agent step")
+    c.add_argument("--no-relevance", dest="relevance", action="store_false",
+                   help="skip the NLI topic check (no torch needed)")  # fmt: skip
     c.set_defaults(func=_cmd_chat)
 
     e = sub.add_parser("eval", help="benchmark the agent on synthetic mailboxes")

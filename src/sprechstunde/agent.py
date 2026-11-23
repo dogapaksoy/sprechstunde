@@ -15,6 +15,9 @@ Guardrails
   whose value belegt finds in the cited sentence. Otherwise the model gets one chance to
   correct itself, then the question goes to a larger model, and if that fails too the
   agent says it cannot confirm the answer instead of guessing.
+* a grounded value can still answer a different question (the Finanzamt deadline for a
+  question about the dog tax), so the letters cited must also be *about* the question's
+  topics (``relevance``: an NLI check, see ``sprechstunde.relevance``).
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from belegt.values import find_amounts, find_dates, parse_amount, parse_date
 
 from sprechstunde.llm import ChatBackend
 from sprechstunde.mailbox import Mailbox
+from sprechstunde.relevance import TopicCheck, topics
 
 FALLBACK = "Das kann ich in Ihren Briefen leider nicht sicher bestätigen."
 
@@ -145,6 +149,7 @@ class Agent:
         max_steps: int = 6,
         retries: int = 1,
         confirm: Callable[[Reminder], bool] = lambda _r: True,
+        relevance: TopicCheck | None = None,
     ) -> None:
         self.backend = backend
         self.mailbox = mailbox
@@ -153,6 +158,8 @@ class Agent:
         self.max_steps = max_steps
         self.retries = retries
         self.confirm = confirm
+        self.relevance = relevance
+        self._topics: list[str] = []
         self.verifier = Verifier(FuzzyMatcher(85))
         self.reminders: list[Reminder] = []
         self._wants_reminder = False
@@ -189,6 +196,7 @@ class Agent:
         seen: set[str] = set()
         self._wants_reminder = bool(re.search(r"\berinner|\bremind", question, re.IGNORECASE))
         self._scope = self.mailbox.mentioned(question)
+        self._topics = topics(question)
         for _ in range(self.max_steps):
             out = backend.complete(messages, ACTION_SCHEMA)
             try:
@@ -280,6 +288,8 @@ class Agent:
                     "sentence that contains the date first.")  # fmt: skip
         if self.verify and not self._in_scope(source):
             return f"add_reminder REJECTED: {self._scope_problem(source)}."
+        if self.verify and (off := self._off_topic([source])):
+            return f"add_reminder REJECTED: {off[0]}."
         letter_id, sentence = self.mailbox.sentence(source) or ("", "")
         r = Reminder(str(a.get("title", "")), date, source, letter_id, sentence)
         if not self.confirm(r):
@@ -294,10 +304,12 @@ class Agent:
         Only what the user hears is checked: every date and amount in ``say`` must be backed
         by a claim whose value belegt finds in the cited sentence. Claims for values that
         are not spoken are ignored, so a stray extra claim cannot block a correct answer.
-        If the question names a letter ("beim Jobcenter"), evidence must come from it."""
+        If the question names a letter ("beim Jobcenter"), evidence must come from it, and
+        with ``relevance`` the cited letters must be about the question's topics."""
         problems = []
         spoken_dates, spoken_amounts = set(find_dates(say)), set(find_amounts(say))
         dates, amounts = set(), set()
+        cited = []
         for c in claims:
             try:
                 kind, value, source = ValueType(c["type"]), str(c["value"]), str(c["source"])
@@ -317,11 +329,33 @@ class Agent:
                 problems.append(self._scope_problem(source))
             else:
                 verified.add(parsed)
+                cited.append(source)
+        problems += self._off_topic(cited)
         for d in sorted(spoken_dates - dates):
             problems.append(f"the date {d:%d.%m.%Y} in your answer has no verified claim")
         for m in sorted(spoken_amounts - amounts):
             problems.append(f"the amount {m} in your answer has no verified claim")
         return list(dict.fromkeys(problems))
+
+    def _off_topic(self, sources: list[str]) -> list[str]:
+        """Per cited letter: its sender, subject and cited sentences must be about every
+        topic of the question."""
+        if self.relevance is None or not self._topics:
+            return []
+        by_letter: dict[str, list[str]] = {}
+        for s in sources:
+            if found := self.mailbox.sentence(s):
+                by_letter.setdefault(found[0], []).append(found[1])
+        problems = []
+        for lid, sentences in by_letter.items():
+            lt = self.mailbox.letters[lid]
+            evidence = " ".join([lt.sender, lt.subject, *dict.fromkeys(sentences)])
+            if missing := self.relevance(evidence, self._topics):
+                problems.append(
+                    f"letter {lid} is not about {', '.join(missing)}. If no letter answers "
+                    "the question, say so without any date or amount"
+                )
+        return problems
 
     def _in_scope(self, source: str) -> bool:
         found = self.mailbox.sentence(source)

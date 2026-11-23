@@ -166,3 +166,45 @@ def test_unspoken_extra_claim_does_not_block_a_correct_answer(mailbox):
                {"type": "amount", "value": "93.00", "source": s}),
     ])  # fmt: skip
     assert Agent(llm, mailbox).ask("Bis wann?").verified
+
+
+def test_topics_are_the_specific_nouns_of_the_question():
+    from sprechstunde.relevance import topics
+
+    assert topics("Bis wann muss ich die Hundesteuer bezahlen?") == ["Hundesteuer"]
+    assert topics("Wie hoch ist die Gebühr bei der Ausländerbehörde?") == ["Ausländerbehörde"]
+    assert topics("Können Sie mir die Frist nennen?") == []
+
+
+def test_grounded_value_from_a_letter_about_something_else_is_rejected(mailbox):
+    # The Jobcenter deadline is real, but the question is about the dog tax.
+    s = sid(mailbox, "Kontoauszüge")
+    seen = []
+
+    def about(evidence, topics):
+        seen.append(evidence)
+        return [t for t in topics if t.casefold() not in evidence.casefold()]
+
+    llm = ScriptedBackend([
+        answer("Bis zum 27.03.2026.", {"type": "date", "value": "2026-03-27", "source": s}),
+        answer("Dazu habe ich keinen Brief."),
+    ])  # fmt: skip
+    r = Agent(llm, mailbox, relevance=about).ask("Bis wann muss ich die Hundesteuer bezahlen?")
+    assert r.verified and r.say == "Dazu habe ich keinen Brief."
+    assert "letter jobcenter is not about Hundesteuer" in llm.calls[1][-1]["content"]
+    assert seen[0].startswith("Jobcenter Karlsruhe") and "Kontoauszüge" in seen[0]
+
+
+def test_reminder_from_an_off_topic_letter_is_rejected(mailbox):
+    s = sid(mailbox, "Kontoauszüge")
+    llm = ScriptedBackend([
+        {"tool": "add_reminder", "title": "Miete", "date": "2026-03-27", "source": s},
+        answer("Dazu habe ich keinen Brief."),
+    ])  # fmt: skip
+    r = Agent(llm, mailbox, relevance=lambda ev, ts: ts, retries=0).ask(
+        "Erinnere mich an die Miete."
+    )
+    assert (
+        r.reminders == []
+        and "REJECTED: letter jobcenter is not about Miete" in (llm.calls[1][-1]["content"])
+    )
