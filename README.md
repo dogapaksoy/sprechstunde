@@ -117,47 +117,52 @@ and a small `repair_numbers` step fixed that.
 `sprechstunde voice-eval` measures the voice layer without a microphone: Piper speaks,
 Whisper listens.
 
-**Answers** (92 distinct answers with a date or amount from all runs): does the user hear
-the verified values?
+**Answers** (100 distinct answers with a date or amount from all runs): does the user
+hear the verified values?
 
 | synthesised from | heard as | values match |
 |---|---|---|
-| raw answer text | plain Whisper | 63% |
-| `speakable()` text | plain Whisper | 98% |
-| `speakable()` text | number prompt + `repair_numbers` | 100% |
-| full `say()` with retry | | 98%; the other 2 fall back to the safe sentence |
+| raw answer text | plain Whisper | 68% |
+| `speakable()` text | plain Whisper | 96% |
+| `speakable()` text | number prompt + `repair_numbers` | 99% |
+| full `say()` with one slower retry | | 100% |
 
-`speakable()` is the big step (63% → 98%). Piper samples its audio, so the same text does
-not give the same audio twice; the 2 fallbacks in the last row are such runs, and they fail
-safely.
+`speakable()` is the big step (68% → 96%). Piper samples its audio, so the same text does
+not sound the same twice, and the numbers vary by a point or two between runs (an earlier
+run: 63%, 98%, 100%, and 2 of 92 answers fell back to the safe sentence).
 
-**Questions** (22 distinct benchmark questions):
+**Questions** (22 distinct benchmark questions). Whisper first heard **"Jobcenter" as
+"Jobcounter"**, which cost every task lost to speech (below). Questions are now
+transcribed with a fixed list of German authority names as Whisper hotwords
+(`voice.AUTHORITIES`, not tuned to the benchmark questions):
 
-| audio | word error rate | topic words heard correctly |
-|---|---|---|
-| clean | 3.6% | 86% |
-| white noise, SNR 10 dB | 6.1% | 86% |
-| white noise, SNR 5 dB | 16.7% | 59% |
+| audio | word error rate | topic words heard correctly | without hotwords |
+|---|---|---|---|
+| clean | 1.7% | 95% | 3.6%, 86% |
+| white noise, SNR 10 dB | 2.9% | 95% | 6.1%, 86% |
+| white noise, SNR 5 dB | 17.0% | 59% | 16.7%, 59% |
 
-Biasing Whisper with the words from the user's letters raised topic recall a little but
-made it "hear" letter words in unanswerable questions, so it was not adopted.
+The remaining clean-audio miss is "Kontoauszüge" heard as "Kontorauszüge". Biasing Whisper
+with the words from the user's own letters instead raised topic recall a little but made
+it "hear" letter words in unanswerable questions, so it was not adopted.
 
 **End to end:** the full agent (grounding + topic check + escalation) on the 60 tasks,
-with every question spoken by Piper and transcribed by Whisper:
+with every question spoken by Piper and transcribed by Whisper (clean audio):
 
 | condition | answers correct | **answers wrong** | gave up | unanswerable: **hallucinated** | reminders correct | s / task (median, p90) |
 |---|---|---|---|---|---|---|
 | typed questions | 72% | **3%** | 25% | **0%** | 50% | 27, 89 |
-| spoken questions (clean audio) | 64% | **3%** | 33% | **0%** | 42% | 30, 92 |
+| spoken, no hotwords | 64% | **3%** | 33% | **0%** | 42% | 30, 92 |
+| **spoken, authority hotwords** | **72%** | **3%** | 25% | **0%** | 50% | 24, 86 |
 
-All 4 tasks lost to speech have the same cause: Whisper heard **"Jobcenter" as
-"Jobcounter"** (or "Lobkenter"). The topic check then found no letter about a
-"Jobcounter", and the assistant said it could not find the answer. No mishearing produced
-a wrong value: the guardrails turn speech errors into "I don't know", not into wrong
-deadlines. The cause is probably Piper pronouncing the English loanword oddly; a real
-speaker may be heard better.
+Without hotwords, all 4 lost tasks were "Jobcounter" questions: the topic check found no
+letter about a "Jobcounter", and the assistant said it could not find the answer. No
+mishearing produced a wrong value; the guardrails turn speech errors into "I don't know",
+not into wrong deadlines. With hotwords, spoken questions score the same as typed ones,
+task for task (all 60 outcomes equal), although 16 of the 60 transcripts still differ from
+the typed text ("Kontorauszüge", "musste" for "muss", a missing full stop).
 
-Median CPU seconds: question transcription 5.5, answer synthesis 0.3, readback check 5.2.
+Median CPU seconds: question transcription 4.6, answer synthesis 0.2, readback check 4.2.
 
 ## Benchmark
 
@@ -207,9 +212,8 @@ want to install torch.
   spoken "einen Moment, ich schaue nach" and a GPU or smaller prompts.
 - **Synthetic speech.** The voice benchmark uses one synthetic voice for questions and
   white noise. Real users have accents, dialects, room echo and hesitations; this
-  measures the pipeline, not robustness to real speech. Recognising the authorities'
-  names ("Jobcenter") is the first thing to fix, e.g. with a fixed list of authority
-  names as Whisper hotwords.
+  measures the pipeline, not robustness to real speech. At 5 dB SNR only 59% of the
+  topic words survive.
 - **Synthetic letters.** Five templates with simulated OCR noise, not real scans. Real
   letters have tables, multiple deadlines and legal boilerplate.
 - Not legal advice. The assistant reads letters, it does not interpret them.
