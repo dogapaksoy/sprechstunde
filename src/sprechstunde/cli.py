@@ -84,7 +84,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 def _cmd_voice_eval(args: argparse.Namespace) -> int:
     from sprechstunde import voice_eval
 
-    print(voice_eval.main(Path(args.runs), Path(args.out)))
+    print(voice_eval.main(Path(args.runs), Path(args.out), args.n, agent=not args.no_agent))
     return 0
 
 
@@ -141,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("voice-eval", help="benchmark speech in/out and the readback check")
     v.add_argument("--runs", default="results/runs", help="agent outputs whose answers to speak")
     v.add_argument("--out", default="results/voice")
+    v.add_argument("-n", type=int, default=12, help="mailboxes for the end-to-end agent run")
+    v.add_argument("--no-agent", action="store_true", help="skip the end-to-end agent run")
     v.set_defaults(func=_cmd_voice_eval)
 
     e = sub.add_parser("eval", help="benchmark the agent on synthetic mailboxes")

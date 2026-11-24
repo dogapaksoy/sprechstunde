@@ -114,8 +114,12 @@ def run(
     noise: float = 0.03,
     seed: int = 0,
     log: Callable[[str], None] = print,
+    hear: Callable[[str], str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Run (or resume) one condition; every result is appended to ``<out_dir>/<name>.jsonl``."""
+    """Run (or resume) one condition; every result is appended to ``<out_dir>/<name>.jsonl``.
+
+    ``hear`` turns the written question into what the agent receives, e.g. text-to-speech
+    followed by speech recognition. Scoring always uses the written question's gold answer."""
     path = out_dir / f"{name}.jsonl"
     done = {}
     if path.exists():
@@ -132,9 +136,11 @@ def run(
                     rows.append(done[(t.episode, t.question)])
                     continue
                 agent = agent or make_agent(mailbox)
-                r: Result = agent.ask(t.question)
+                heard = hear(t.question) if hear else t.question
+                r: Result = agent.ask(heard)
                 row = {"condition": name, "episode": t.episode, "kind": t.kind,
-                       "question": t.question, "gold": t.gold, "gold_type": t.gold_type,
+                       "question": t.question, "heard": heard, "gold": t.gold,
+                       "gold_type": t.gold_type,
                        "outcome": outcome(t, r.say, r.reminders), **r.to_dict(),
                        "llm_seconds": r.llm_seconds}  # fmt: skip
                 f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")

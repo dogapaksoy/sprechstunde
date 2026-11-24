@@ -18,14 +18,13 @@ import statistics
 import time
 import wave
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
 from sprechstunde.evaluate import QUESTIONS, REMINDERS, UNANSWERABLE
 from sprechstunde.mailbox import _fold
 from sprechstunde.relevance import topics
-from sprechstunde.voice import Voice, readback_ok, speakable, values
+from sprechstunde.voice import NUMBER_PROMPT, Voice, readback_ok, speakable, values
 
 
 def add_noise(audio: bytes, snr_db: float, seed: int = 0) -> bytes:
@@ -74,6 +73,7 @@ def questions(voice: Voice, snrs: tuple[float | None, ...] = (None, 10.0, 5.0)) 
 
 
 def answers(voice: Voice, runs: Path) -> list[dict]:
+    """Every distinct spoken answer with a date or amount from the stored agent runs."""
     said = {}
     for path in sorted(runs.glob("*.jsonl")):
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -83,22 +83,50 @@ def answers(voice: Voice, runs: Path) -> list[dict]:
     rows = []
     for say in said:
         raw = voice.transcribe(voice.synthesize(say))
-        normed = voice.transcribe(voice.synthesize(speakable(say)))
-        spoken = voice.say(say)
-        rows.append({"say": say, "raw_heard": raw, "raw_ok": readback_ok(say, raw),
-                     "speakable": speakable(say), "speakable_heard": normed,
-                     "speakable_ok": readback_ok(say, normed), "final_ok": spoken.ok,
-                     "attempts": spoken.attempts, **{f"{k}_seconds": v for k, v in spoken.seconds.items()}})  # fmt: skip  # noqa: E501
+        spoken_audio = voice.synthesize(speakable(say))
+        plain = voice.transcribe(spoken_audio)
+        prompted = voice.transcribe(spoken_audio, prompt=NUMBER_PROMPT)
+        final = voice.say(say)
+        rows.append({"say": say, "raw_heard": raw, "speakable": speakable(say),
+                     "speakable_heard": plain, "prompted_heard": prompted,
+                     "raw_ok": values(say) == values(raw),
+                     "speakable_ok": values(say) == values(plain),
+                     "readback_ok": readback_ok(say, prompted), "final_ok": final.ok,
+                     "attempts": final.attempts,
+                     **{f"{k}_seconds": v for k, v in final.seconds.items()}})  # fmt: skip
     return rows
+
+
+def spoken_agent(voice: Voice, n: int, runs: Path, model: str, escalate: str) -> list[dict]:
+    """The full agent on the benchmark, with every question spoken by Piper and heard by
+    Whisper (clean audio). Same tasks and scoring as ``sprechstunde eval``."""
+    from sprechstunde.agent import Agent
+    from sprechstunde.evaluate import run
+    from sprechstunde.llm import LlamaCppBackend
+    from sprechstunde.relevance import NLITopicCheck
+
+    heard: dict[str, str] = {}
+
+    def hear(question: str) -> str:
+        if question not in heard:
+            heard[question] = voice.transcribe(voice.synthesize(question))
+        return heard[question]
+
+    small, large, topic = LlamaCppBackend(model), LlamaCppBackend(escalate), NLITopicCheck()
+    name = f"{model}+verify+topic+{escalate}+voice"
+    make = lambda mb: Agent(small, mb, escalate_to=large, relevance=topic)  # noqa: E731
+    return run(name, make, n, runs, hear=hear)
 
 
 def _pct(xs: list[bool]) -> str:
     return f"{sum(xs) / len(xs):.0%}" if xs else "–"
 
 
-def report(q_rows: list[dict[str, Any]], a_rows: list[dict[str, Any]]) -> str:
-    lines = ["### Questions (Piper -> Whisper small)", "",
-             "| audio | word error rate | topics kept |", "|---|---|---|"]  # fmt: skip
+def report(q_rows: list[dict], a_rows: list[dict], typed: list[dict], spoken: list[dict]) -> str:
+    from sprechstunde.evaluate import Summary, to_markdown
+
+    lines = ["### Questions: Piper -> Whisper large-v3-turbo", "",
+             "| audio | word error rate | topic words heard |", "|---|---|---|"]  # fmt: skip
     for snr in dict.fromkeys(r["snr_db"] for r in q_rows):
         rs = [r for r in q_rows if r["snr_db"] == snr]
         label = "clean" if snr is None else f"white noise, SNR {snr:g} dB"
@@ -106,28 +134,40 @@ def report(q_rows: list[dict[str, Any]], a_rows: list[dict[str, Any]]) -> str:
         mean_wer = statistics.mean(r["wer"] for r in rs)
         lines.append(f"| {label} | {mean_wer:.1%} | {kept} ({len(rs)} questions) |")
     n = len(a_rows)
-    lines += ["", f"### Answers with a date or amount ({n} distinct answers)", "",
-              "| what is synthesised | user hears the verified values |", "|---|---|",
-              f"| raw answer text | {_pct([r['raw_ok'] for r in a_rows])} |",
-              f"| `speakable()` text | {_pct([r['speakable_ok'] for r in a_rows])} |",
-              f"| `speakable()` + readback check (else fallback) | 100% by construction; "
-              f"fallback on {_pct([not r['final_ok'] for r in a_rows])} |"]  # fmt: skip
+    sp_ok = _pct([r["speakable_ok"] for r in a_rows])
+    lines += ["", f"### Answers: does the user hear the verified values? ({n} distinct answers)",
+              "", "| synthesised from | heard as | values match |", "|---|---|---|",
+              f"| raw answer text | plain Whisper | {_pct([r['raw_ok'] for r in a_rows])} |",
+              f"| `speakable()` text | plain Whisper | {sp_ok} |",
+              f"| `speakable()` text | number prompt + `repair_numbers` | "
+              f"{_pct([r['readback_ok'] for r in a_rows])} |",
+              f"| + one slower retry | | {_pct([r['final_ok'] for r in a_rows])}; the rest falls "
+              "back to a safe sentence |"]  # fmt: skip
+    if spoken:
+        lines += ["", "### End to end: the full agent on spoken questions", "",
+                  to_markdown([Summary.of("typed questions", typed),
+                               Summary.of("spoken questions (clean audio)", spoken)])]  # fmt: skip
     tts = sorted(r.get("tts_seconds", 0) for r in a_rows)
     back = sorted(r.get("readback_seconds", 0) for r in a_rows)
     stt = sorted(r["stt_seconds"] for r in q_rows)
     lines += ["", "Median seconds on the CPU: question transcription "
-              f"{statistics.median(stt):.2f}, answer synthesis {statistics.median(tts):.2f}, "
-              f"readback check {statistics.median(back):.2f}."]  # fmt: skip
+              f"{statistics.median(stt):.1f}, answer synthesis {statistics.median(tts):.1f}, "
+              f"readback check {statistics.median(back):.1f}."]  # fmt: skip
     return "\n".join(lines)
 
 
-def main(runs: Path, out: Path) -> str:
+def main(runs: Path, out: Path, n: int = 12, model: str = "qwen3-1.7b",
+         escalate: str = "qwen3-4b", agent: bool = True) -> str:  # fmt: skip
     voice = Voice()
     out.mkdir(parents=True, exist_ok=True)
+    spoken = spoken_agent(voice, n, runs, model, escalate) if agent else []
+    typed_path = runs / f"{model}+verify+topic+{escalate}.jsonl"
+    typed = [json.loads(x) for x in typed_path.read_text(encoding="utf-8").splitlines()] if (
+        typed_path.exists()) else []  # fmt: skip
     q_rows, a_rows = questions(voice), answers(voice, runs)
     for name, rows in (("questions", q_rows), ("answers", a_rows)):
         with (out / f"voice-{name}.jsonl").open("w", encoding="utf-8") as f:
             f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
-    text = report(q_rows, a_rows)
+    text = report(q_rows, a_rows, typed, spoken)
     (out / "voice-summary.md").write_text(text + "\n", encoding="utf-8")
     return text
