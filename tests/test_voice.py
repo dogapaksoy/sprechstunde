@@ -23,3 +23,16 @@ def test_readback_catches_a_misheard_year_or_amount():
     assert not readback_ok("Die Gebühr beträgt 98,00 €.", "Die Gebühr beträgt 8 Euro.")
     assert not readback_ok("Die Gebühr beträgt 98,00 €.", "Die Gebühr beträgt achtundneunzig Euro.")
     assert readback_ok("Das steht nicht in Ihren Briefen.", "Das steht nicht in Ihren Briefen.")
+
+
+def test_repair_numbers_undoes_literal_german_number_words():
+    from sprechstunde.voice import repair_numbers
+
+    assert repair_numbers("bis zum 8 und 20. März 2006 und 20") == "bis zum 28. März 2026"
+    assert repair_numbers("Sie zahlen 105 und 60,24 Euro") == "Sie zahlen 165,24 Euro"
+    assert (
+        repair_numbers("am 26, Juni 2026, also 2037,5 Euro")
+        == "am 26. Juni 2026, also 2037,50 Euro"
+    )
+    assert repair_numbers("Seite 110 und 20 Zeilen") == "Seite 110 und 20 Zeilen"  # not a unit
+    assert readback_ok("Bis zum 28.03.2026.", "bis zum 8 und 20. März 2006 und 20")

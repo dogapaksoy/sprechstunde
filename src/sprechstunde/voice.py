@@ -1,8 +1,8 @@
 """Voice layer: Whisper in, Piper out, and a readback check in between.
 
 The agent proves every date and amount it *writes*. In a voice interface that is not
-enough: the user only gets what they *hear*. Text-to-speech can garble a number ("27.03.2026"
-comes out as something Whisper hears as "27.03.2006"), and the user can't scroll back.
+enough: the user only gets what they *hear*, and can't scroll back. Synthesised from raw
+text, "27.03.2026" is read digit group by digit group; written out, it is fine.
 
 So before an answer is played:
 
@@ -12,6 +12,12 @@ So before an answer is played:
    found in the transcript must equal those in the text (``readback_ok``). If they don't,
    it is synthesised once more, slower. If that fails too, the assistant does not play a
    possibly wrong number; it says it will show the answer on screen instead.
+
+The readback check is only as good as the ear that listens. Piper's phonemes for numbers
+are right ("acht und zwanzig"), but Whisper writes German compound numbers literally
+("8 und 20", "2006 und 20"). Two fixes, measured in ``voice_eval``: a prompt that shows
+Whisper numbers written as digits, and ``repair_numbers`` for the "A und B0" pattern.
+Whisper large-v3-turbo then reads back 98% of verified values (small: 84%).
 
 Everything runs locally on a CPU: faster-whisper (int8) and Piper (ONNX).
 """
@@ -38,6 +44,32 @@ _NUMERIC_DATE = re.compile(r"\b(\d{1,2})\.\s?(\d{1,2})\.\s?(\d{4})\b")
 _NUM = r"(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{2}))?"
 _AMOUNT = re.compile(rf"(?:€|\bEUR)\s?{_NUM}|\b{_NUM}\s?(?:€|EUR\b|Euro\b)")
 _TIME = re.compile(r"\b(\d{1,2}):(\d{2})\s?Uhr\b")
+
+# Shows Whisper how numbers should be written; used when reading an answer back.
+NUMBER_PROMPT = (
+    "Ihr Termin ist am 28. März 2026 um 9 Uhr. Bitte zahlen Sie 1035,32 Euro bis zum "
+    "14. August 2026."
+)
+_UND = re.compile(r"\b(\d+) und ([2-9]0)\b")
+_DAY_COMMA = re.compile(rf"\b(\d{{1,2}}), ({'|'.join(MONTHS)})\b")
+_ONE_CENT_DIGIT = re.compile(r"\b(\d+),(\d)(?=\s*(?:€|Euro|EUR)\b)")
+
+
+def repair_numbers(transcript: str) -> str:
+    """Undo Whisper's literal transcription of German number words: "achtundzwanzig" is
+    written "8 und 20", "zweitausendsechsundzwanzig" "2006 und 20". Also "26, Juni" ->
+    "26. Juni" and "2037,5 Euro" -> "2037,50 Euro"."""
+
+    def join(m: re.Match[str]) -> str:
+        a, tens = int(m.group(1)), int(m.group(2))
+        units = a % 10
+        if a % 100 >= 10 or units == 0:  # only a bare unit can precede "und <tens>"
+            return m.group(0)
+        return str(a - a % 100 + tens + units)
+
+    transcript = _UND.sub(join, transcript)
+    transcript = _DAY_COMMA.sub(r"\1. \2", transcript)
+    return _ONE_CENT_DIGIT.sub(r"\1,\g<2>0", transcript)
 
 
 def _say_amount(euros: str, cents: str | None) -> str:
@@ -73,7 +105,7 @@ def values(text: str) -> tuple[set, set]:
 
 def readback_ok(text: str, transcript: str) -> bool:
     """Do the dates and amounts the user hears equal the ones that were verified?"""
-    return values(text) == values(transcript)
+    return values(text) == values(repair_numbers(transcript))
 
 
 @dataclass
@@ -89,7 +121,9 @@ class Spoken:
 class Voice:
     """Local speech in and out. Models are loaded on first use and cached by huggingface_hub."""
 
-    def __init__(self, whisper: str = "small", piper: str = "de_DE-thorsten-medium") -> None:
+    def __init__(
+        self, whisper: str = "large-v3-turbo", piper: str = "de_DE-thorsten-medium"
+    ) -> None:
         self.whisper_name, self.piper_name = whisper, piper
         self._stt = self._tts = None
 
@@ -118,9 +152,11 @@ class Voice:
 
     # ------------------------------------------------------------------ io
 
-    def transcribe(self, audio: str | Path | bytes) -> str:
+    def transcribe(self, audio: str | Path | bytes, prompt: str | None = None) -> str:
         source = io.BytesIO(audio) if isinstance(audio, bytes) else str(audio)
-        segments, _ = self.stt.transcribe(source, language="de", beam_size=1, vad_filter=True)
+        segments, _ = self.stt.transcribe(
+            source, language="de", beam_size=1, vad_filter=True, initial_prompt=prompt
+        )
         return " ".join(s.text.strip() for s in segments).strip()
 
     def synthesize(self, text: str, length_scale: float = 1.0) -> bytes:
@@ -143,7 +179,7 @@ class Voice:
             if not check:
                 return Spoken(spoken, audio, "", True, attempt, seconds)
             t0 = time.perf_counter()
-            transcript = self.transcribe(audio)
+            transcript = self.transcribe(audio, prompt=NUMBER_PROMPT)
             seconds["readback"] = seconds.get("readback", 0) + time.perf_counter() - t0
             if readback_ok(text, transcript):
                 return Spoken(spoken, audio, transcript, True, attempt, seconds)
