@@ -67,7 +67,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     if mailbox is None:
         return 1
     voice = Voice()
-    question = voice.transcribe(args.audio)
+    question = voice.listen(args.audio)
     print(f"heard:  {question}")
     agent = Agent(_backend(args.model), mailbox,
                   escalate_to=_backend(args.escalate) if args.escalate else None,

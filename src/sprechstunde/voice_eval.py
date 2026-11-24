@@ -64,7 +64,7 @@ def questions(voice: Voice, snrs: tuple[float | None, ...] = (None, 10.0, 5.0)) 
         for snr in snrs:
             heard_audio = audio if snr is None else add_noise(audio, snr)
             t0 = time.perf_counter()
-            heard = voice.transcribe(heard_audio)
+            heard = voice.listen(heard_audio)
             folded = _fold(heard)
             kept = all(_fold(t) in folded for t in topics(q))
             rows.append({"question": q, "snr_db": snr, "heard": heard, "wer": wer(q, heard),
@@ -109,7 +109,7 @@ def spoken_agent(voice: Voice, n: int, runs: Path, model: str, escalate: str) ->
 
     def hear(question: str) -> str:
         if question not in heard:
-            heard[question] = voice.transcribe(voice.synthesize(question))
+            heard[question] = voice.listen(voice.synthesize(question))
         return heard[question]
 
     small, large, topic = LlamaCppBackend(model), LlamaCppBackend(escalate), NLITopicCheck()
@@ -125,7 +125,7 @@ def _pct(xs: list[bool]) -> str:
 def report(q_rows: list[dict], a_rows: list[dict], typed: list[dict], spoken: list[dict]) -> str:
     from sprechstunde.evaluate import Summary, to_markdown
 
-    lines = ["### Questions: Piper -> Whisper large-v3-turbo", "",
+    lines = ["### Questions: Piper -> Whisper large-v3-turbo with authority hotwords", "",
              "| audio | word error rate | topic words heard |", "|---|---|---|"]  # fmt: skip
     for snr in dict.fromkeys(r["snr_db"] for r in q_rows):
         rs = [r for r in q_rows if r["snr_db"] == snr]

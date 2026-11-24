@@ -50,6 +50,15 @@ NUMBER_PROMPT = (
     "Ihr Termin ist am 28. März 2026 um 9 Uhr. Bitte zahlen Sie 1035,32 Euro bis zum "
     "14. August 2026."
 )
+# Names of German authorities, given to Whisper as hotwords when it hears a question.
+# Without them it heard "Jobcenter" as "Jobcounter", and the topic check then (correctly)
+# found no letter from a "Jobcounter". A fixed domain list, not the user's letters: biasing
+# with the letters' words made Whisper hear them in questions about other matters.
+AUTHORITIES = (
+    "Finanzamt Jobcenter Agentur für Arbeit Ausländerbehörde Bürgeramt Krankenkasse "
+    "Rentenversicherung Familienkasse Beitragsservice Rundfunkbeitrag Standesamt "
+    "Zulassungsstelle"
+)
 _UND = re.compile(r"\b(\d+) und ([2-9]0)\b")
 _DAY_COMMA = re.compile(rf"\b(\d{{1,2}}), ({'|'.join(MONTHS)})\b")
 _ONE_CENT_DIGIT = re.compile(r"\b(\d+),(\d)(?=\s*(?:€|Euro|EUR)\b)")
@@ -152,12 +161,19 @@ class Voice:
 
     # ------------------------------------------------------------------ io
 
-    def transcribe(self, audio: str | Path | bytes, prompt: str | None = None) -> str:
+    def transcribe(
+        self, audio: str | Path | bytes, prompt: str | None = None, hotwords: str | None = None
+    ) -> str:
         source = io.BytesIO(audio) if isinstance(audio, bytes) else str(audio)
         segments, _ = self.stt.transcribe(
-            source, language="de", beam_size=1, vad_filter=True, initial_prompt=prompt
-        )
+            source, language="de", beam_size=1, vad_filter=True, initial_prompt=prompt,
+            hotwords=hotwords,
+        )  # fmt: skip
         return " ".join(s.text.strip() for s in segments).strip()
+
+    def listen(self, audio: str | Path | bytes) -> str:
+        """Transcribe a user's question, biased towards the names of authorities."""
+        return self.transcribe(audio, hotwords=AUTHORITIES)
 
     def synthesize(self, text: str, length_scale: float = 1.0) -> bytes:
         from piper import SynthesisConfig
