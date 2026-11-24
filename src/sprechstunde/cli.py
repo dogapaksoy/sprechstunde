@@ -51,6 +51,43 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_mailbox(folder: str) -> Mailbox | None:
+    paths = sorted(Path(folder).glob("*.txt"))
+    if not paths:
+        print(f"no .txt letters in {folder}")
+        return None
+    return Mailbox([Letter(p.stem, p.read_text(encoding="utf-8")) for p in paths])
+
+
+def _cmd_ask(args: argparse.Namespace) -> int:
+    """One spoken turn: question WAV in, answer WAV out (no microphone needed)."""
+    from sprechstunde.voice import Voice
+
+    mailbox = _load_mailbox(args.letters)
+    if mailbox is None:
+        return 1
+    voice = Voice()
+    question = voice.transcribe(args.audio)
+    print(f"heard:  {question}")
+    agent = Agent(_backend(args.model), mailbox,
+                  escalate_to=_backend(args.escalate) if args.escalate else None,
+                  relevance=_relevance(args.relevance))  # fmt: skip
+    r = agent.ask(question)
+    spoken = voice.say(r.say)
+    print(f"answer: {r.say}")
+    print(f"spoken: {spoken.text}" + ("" if spoken.ok else "  (readback failed)"))
+    Path(args.out).write_bytes(spoken.audio)
+    print(f"wrote {args.out}")
+    return 0
+
+
+def _cmd_voice_eval(args: argparse.Namespace) -> int:
+    from sprechstunde import voice_eval
+
+    print(voice_eval.main(Path(args.runs), Path(args.out)))
+    return 0
+
+
 def _cmd_eval(args: argparse.Namespace) -> int:
     from sprechstunde import evaluate as ev
 
@@ -91,6 +128,20 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--no-relevance", dest="relevance", action="store_false",
                    help="skip the NLI topic check (no torch needed)")  # fmt: skip
     c.set_defaults(func=_cmd_chat)
+
+    a = sub.add_parser("ask", help="answer a spoken question (WAV) with a spoken answer (WAV)")
+    a.add_argument("letters", help="folder with one .txt file per letter")
+    a.add_argument("audio", help="question as a WAV file")
+    a.add_argument("--out", default="answer.wav")
+    a.add_argument("--model", default="qwen3-1.7b")
+    a.add_argument("--escalate", default="qwen3-4b", help="larger model; '' to disable")
+    a.add_argument("--no-relevance", dest="relevance", action="store_false")
+    a.set_defaults(func=_cmd_ask)
+
+    v = sub.add_parser("voice-eval", help="benchmark speech in/out and the readback check")
+    v.add_argument("--runs", default="results/runs", help="agent outputs whose answers to speak")
+    v.add_argument("--out", default="results/voice")
+    v.set_defaults(func=_cmd_voice_eval)
 
     e = sub.add_parser("eval", help="benchmark the agent on synthetic mailboxes")
     e.add_argument("-n", type=int, default=12, help="number of mailboxes (5 tasks each)")

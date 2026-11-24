@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 local = ["llama-cpp-python>=0.3", "huggingface_hub>=0.23"]
+voice = ["faster-whisper>=1.0", "piper-tts>=1.3", "numpy"]
 nli = ["torch>=2.1", "transformers>=4.40", "sentencepiece", "protobuf"]
 dev = ["pytest>=8", "ruff>=0.5"]
 
