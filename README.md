@@ -11,9 +11,9 @@ against the letter first, and if the check fails it says so instead of guessing.
 It runs fully offline on a laptop CPU with small open models (Qwen3 1.7B, escalating to
 Qwen3 4B), because these letters should not leave the user's machine.
 
-The answer is meant to be **spoken** (a voice layer with Whisper and Piper is next). In a
-voice interface the user cannot see a source link or skim the letter. What is said is all
-they get, so a confident wrong date is the worst possible failure.
+The answer is **spoken** (Whisper in, Piper out, both local). In a voice interface the
+user cannot see a source link or skim the letter. What is said is all they get, so a
+confident wrong date is the worst possible failure.
 
 ## Results
 
@@ -93,6 +93,72 @@ Design decisions that mattered (all found by reading failing traces):
 - **Small model first, large model only when needed.** Most questions are answered by the
   1.7B model. Only answers that fail the checks go to the 4B model.
 
+## Voice
+
+`sprechstunde ask letters/ question.wav --out answer.wav` transcribes the question with
+Whisper large-v3-turbo, runs the agent, and speaks the answer with Piper
+(`de_DE-thorsten-medium`). Both run on the CPU.
+
+Verifying the text is not enough when the user only *hears* it. So before an answer is
+played:
+
+1. `speakable()` rewrites dates and amounts into spoken forms: "27.03.2026" →
+   "27. März 2026", "4.799,10 €" → "4799,10 Euro".
+2. **Readback check:** the synthesised audio is transcribed again, and the dates and
+   amounts Whisper hears must equal the verified ones. If not, it is synthesised once more,
+   slower. If that fails too, the assistant says it will show the answer on screen instead
+   of playing a possibly wrong number.
+
+The readback check is only as good as the ear. Piper's phonemes for numbers were right
+("acht und zwanzig"), but Whisper wrote German compound numbers literally ("8 und 20",
+"2006 und 20"), so correct audio looked wrong. A prompt showing numbers written as digits
+and a small `repair_numbers` step fixed that.
+
+`sprechstunde voice-eval` measures the voice layer without a microphone: Piper speaks,
+Whisper listens.
+
+**Answers** (92 distinct answers with a date or amount from all runs): does the user hear
+the verified values?
+
+| synthesised from | heard as | values match |
+|---|---|---|
+| raw answer text | plain Whisper | 63% |
+| `speakable()` text | plain Whisper | 98% |
+| `speakable()` text | number prompt + `repair_numbers` | 100% |
+| full `say()` with retry | | 98%; the other 2 fall back to the safe sentence |
+
+`speakable()` is the big step (63% → 98%). Piper samples its audio, so the same text does
+not give the same audio twice; the 2 fallbacks in the last row are such runs, and they fail
+safely.
+
+**Questions** (22 distinct benchmark questions):
+
+| audio | word error rate | topic words heard correctly |
+|---|---|---|
+| clean | 3.6% | 86% |
+| white noise, SNR 10 dB | 6.1% | 86% |
+| white noise, SNR 5 dB | 16.7% | 59% |
+
+Biasing Whisper with the words from the user's letters raised topic recall a little but
+made it "hear" letter words in unanswerable questions, so it was not adopted.
+
+**End to end:** the full agent (grounding + topic check + escalation) on the 60 tasks,
+with every question spoken by Piper and transcribed by Whisper:
+
+| condition | answers correct | **answers wrong** | gave up | unanswerable: **hallucinated** | reminders correct | s / task (median, p90) |
+|---|---|---|---|---|---|---|
+| typed questions | 72% | **3%** | 25% | **0%** | 50% | 27, 89 |
+| spoken questions (clean audio) | 64% | **3%** | 33% | **0%** | 42% | 30, 92 |
+
+All 4 tasks lost to speech have the same cause: Whisper heard **"Jobcenter" as
+"Jobcounter"** (or "Lobkenter"). The topic check then found no letter about a
+"Jobcounter", and the assistant said it could not find the answer. No mishearing produced
+a wrong value: the guardrails turn speech errors into "I don't know", not into wrong
+deadlines. The cause is probably Piper pronouncing the English loanword oddly; a real
+speaker may be heard better.
+
+Median CPU seconds: question transcription 5.5, answer synthesis 0.3, readback check 5.2.
+
 ## Benchmark
 
 `sprechstunde eval` builds 12 synthetic mailboxes. Each has five letters (one per
@@ -113,9 +179,11 @@ Every raw output, with every agent step, is in [`results/runs/`](results/runs).
 ## Usage
 
 ```bash
-pip install "sprechstunde[local,nli] @ git+https://github.com/dogapaksoy/sprechstunde.git"
+pip install "sprechstunde[local,nli,voice] @ git+https://github.com/dogapaksoy/sprechstunde.git"
 sprechstunde chat path/to/letters/   # one .txt per letter; models download on first use
+sprechstunde ask examples/letters/ question.wav --out answer.wav   # spoken question and answer
 sprechstunde eval -n 12              # the benchmark above
+sprechstunde voice-eval              # the voice benchmark
 ```
 
 `--trace` prints every agent step. `--no-relevance` skips the NLI topic check if you don't
@@ -135,8 +203,13 @@ want to install torch.
   needs a second signal, e.g. a plausibility check against the other amounts in the letter
   or asking the user to look at the line.
 - **Latency.** On a CPU a question takes 20–30 s with the small model and up to ~90 s when
-  it escalates. A voice interface needs a spoken "einen Moment, ich schaue nach" and a GPU or
-  smaller prompts.
+  it escalates, plus about 10 s for speech in and readback out. A voice interface needs a
+  spoken "einen Moment, ich schaue nach" and a GPU or smaller prompts.
+- **Synthetic speech.** The voice benchmark uses one synthetic voice for questions and
+  white noise. Real users have accents, dialects, room echo and hesitations; this
+  measures the pipeline, not robustness to real speech. Recognising the authorities'
+  names ("Jobcenter") is the first thing to fix, e.g. with a fixed list of authority
+  names as Whisper hotwords.
 - **Synthetic letters.** Five templates with simulated OCR noise, not real scans. Real
   letters have tables, multiple deadlines and legal boilerplate.
 - Not legal advice. The assistant reads letters, it does not interpret them.
